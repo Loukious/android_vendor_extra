@@ -2,6 +2,19 @@
 # Personal crDroid onyx product additions
 #
 
+# Unofficial build identity.
+#
+# Settings' "Device maintainer" entry (BuildMaintainerPreference) and the donate
+# link behind it read these two properties. They exist because the stock
+# behaviour is to look the maintainer up in crDroid's OTA index by device
+# codename alone -- and onyx *does* have an official entry there, so without
+# these an unofficial build would proudly credit the official maintainer and
+# point donations at their PayPal. See
+# patches/packages_apps_Settings/0001-maintainer-from-prop.patch.
+PRODUCT_PRODUCT_PROPERTIES += \
+    ro.crdroid.maintainer=Loukious \
+    ro.crdroid.donate.url=https://buymeacoffee.com/loukious
+
 # Build a bundled-GApps variant.
 WITH_GMS := true
 BUILD_WITH_GAPPS := true
