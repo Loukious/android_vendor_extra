@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<!--
+     Now Playing, userspace half. (The HAL half is a PAL stream_config for the
+     model's vendor_uuid, carried in crdroid_onyx_patches as
+     patches/vendor_xiaomi_onyx/0002-soundtrigger-google-music-detector.patch.)
+
+     ASI gets its Now Playing configuration from the DeviceConfig namespace
+     device_personalization_services, which GMS Phenotype populates at runtime.
+     Google withholds a chunk of it from non-Pixel devices: the ASI prebuilt we
+     ship references 106 NowPlaying__* flags and Phenotype delivers only 53 here.
+
+     Almost all of the shortfall is harmless, but ONE of the missing flags is
+     load-bearing: ambient_music_index_manifest_17_09_02 carries the URL of the
+     song-database manifest, in the form "<version>:<manifest-url>". There is no
+     compiled-in default anywhere in the APK - grep the dex and you will not find
+     a single "music-iq" string. So with the flag absent, ASI has nothing to fetch
+     and Now Playing sits on "Downloading song database" forever. That was the
+     second of the two bugs that kept this feature dead on onyx.
+
+     SimpleDeviceConfig re-applies these at every LOCKED_BOOT_COMPLETED with
+     makeDefault=true, so they act as a FALLBACK: a later Phenotype sync can still
+     override any of them. That layering is deliberate, and it is why this list is
+     deliberately minimal - it sets only the three flags Phenotype demonstrably
+     does not send to this device, and does not fight Google over the other 42 that
+     it does send correctly. Overriding those would just pin them stale forever.
+
+     In particular NowPlaying__dsp_model_checksum_enabled is NOT set here even
+     though some Qualcomm Pixel trees (e.g. redbull) force it false. Phenotype
+     sends it as true on onyx, and the model provably loads with it true -
+     LOAD_MODEL -> 3 / START_RECOGNITION -> Binder, with no checksum complaint
+     anywhere in the log. It was never part of the bug.
+
+     THE DSP AUDIO SOURCE IS THE THIRD BUG, and ambient_music_use_dsp_audio_source
+     below is the fix. PAL reports LOAD_MODEL/START_RECOGNITION success at the HAL
+     boundary but the ADSP session underneath is inert: module_type CUSTOM1 resolves
+     to CustomVAInterface, libcustomva_intf.so on this SoC is a Qualcomm stub, and
+     ACDB carries no graph for it ("AcdbCmdGetGraphAlias Error[19]: Unable to find
+     graph key vector", then graph_set_config -131 on every set_config). So ASI
+     armed a session that could never deliver a buffer, and recognition_history
+     stayed empty.
+
+     ASI does not need that session. Recognition runs entirely in userspace here:
+     libsense_nnfp_v3.so is the neural fingerprinter and music_detector.sound_model
+     is a TFLite model ("TFL3" magic at offset 4), both inside the APK. The only
+     thing the DSP was providing was the audio buffer, and there is a flag for that.
+     Decompiled, the branch is unambiguous:
+
+         iget-boolean v1, v1, Lyxc;->o:Z      # ambient_music_use_dsp_audio_source
+         if-eqz v1, :cond_5e
+         ...  "Creating AudioRecord accessing DSP audio."   -> Lyyx;->d(F)
+       :cond_5e
+         ...  "Creating AudioRecord accessing Mic audio (shouldn't happen)."
+              new AudioRecord(0 /* DEFAULT/MIC */, 16000, CHANNEL_IN_MONO,
+                              ENCODING_PCM_16BIT, size)
+
+     The mic branch touches neither SoundTrigger nor Lyyx, so it needs no ACDB graph.
+     Its "(shouldn't happen)" log string is Google's, and only means no Pixel ever
+     takes it - the path is fully implemented, not a stub.
+
+     NECESSARY BUT NOT SUFFICIENT - do not stop reading here. Tracing further up
+     the ambient pipeline settles the question this flag does NOT answer:
+
+       Lylv  = com/google/intelligence/sense/ambientmusic/buffer/AudioBufferManager
+       Lyls  = its lambda, the branch above
+       Lyyx  = the trigger object every stage consumes
+
+     Lyyx has exactly one <init> call site in the whole APK, inside
+       Lyyx;->b(Landroid/hardware/soundtrigger/SoundTrigger$RecognitionEvent;)
+     which reflects "status" and "data" off the event. Its only two callers are
+     Lyyp (extends android.media.soundtrigger.SoundTriggerDetectionService,
+     onGenericRecognitionEvent) and Lyys (a BroadcastReceiver taking the event out
+     of an Intent). SoundTrigger$RecognitionEvent is NEVER constructed inside the
+     APK - grep for it and you get nothing.
+
+     So the ambient pipeline is hard-gated on the framework delivering a real
+     SoundTrigger recognition event. This flag changes where the audio comes from
+     AFTER that event; it does not start anything. On onyx the session arms and
+     stays inert, so no event ever arrives and the branch above is never reached.
+
+     Keep the flag anyway: it is correct, it is free, and it is a prerequisite for
+     any fix to the trigger - a synthesized event does not have to carry a usable
+     DSP capture session if ASI is going to open its own mic AudioRecord.
+
+     THE REMAINING BLOCKER, and it is tractable because we build frameworks/base:
+     something has to hand ASI a SoundTrigger$RecognitionEvent. Lyys being a plain
+     BroadcastReceiver is the opening. That is a real project, not a config change,
+     and it belongs to a later phase.
+
+     WHAT SHOULD ALREADY WORK ON onyx: on-demand recognition. Lyxx;->d() opens its
+     own AudioRecord(1 /* MIC */, 16000, CHANNEL_IN_MONO, PCM_16BIT, 0x3e800) and
+     drives android.media.musicrecognition.RecognitionRequest - the
+     MusicRecognitionManager system API, no SoundTrigger anywhere. That is the
+     "identify this song" button rather than passive ambient detection. Test that
+     before assuming Now Playing is wholly broken.
+
+     Two costs of taking the mic path, once the trigger exists: ASI holds a real
+     mic AudioRecord instead of a low-power DSP island, so expect the mic privacy
+     indicator and measurably worse standby drain.
+
+     The flag itself is still worth setting live before trusting a build:
+
+         adb shell device_config put device_personalization_services \
+             NowPlaying__ambient_music_use_dsp_audio_source false
+
+     then play music near the device and watch `adb logcat -s AmbientMusic`.
+
+     One more thing to verify on device rather than assume. SimpleDeviceConfig
+     calls DeviceConfig.setProperty(..., makeDefault=true) once per
+     LOCKED_BOOT_COMPLETED. That survives a resetToDefaults, but it does NOT
+     survive a Phenotype sync that explicitly pushes the same key - and this key
+     may or may not be in the 53 flags Phenotype actually sends to a non-Pixel
+     (the APK references 106). So after a boot, confirm the value stuck:
+
+         adb shell device_config get device_personalization_services \
+             NowPlaying__ambient_music_use_dsp_audio_source
+
+     If it reads back true, Phenotype is overwriting us and the flag has to be
+     pinned another way (e.g. blocking the ASI Phenotype sync, or setting it from
+     a later-running hook than LOCKED_BOOT_COMPLETED).
+
+     REFRESHING THE CORPUS: the version/URL below pins a specific database build,
+     so it will slowly go stale and start missing very recent releases (recognition
+     of everything already in it keeps working). To refresh, take the current value
+     from a Pixel device tree that crDroid still maintains, e.g.
+     device/google/zumapro/overlay/SimpleDeviceConfigOverlayZumapro/res/values/config.xml.
+     Do not hand-edit the date in the URL - the numeric prefix is a corpus version
+     that has to match the manifest, and a mismatch is rejected.
+-->
+<resources>
+    <string-array name="configs_device" translatable="false">
+        <!-- The song database. This is the flag that actually fixes Now Playing. -->
+        <item>device_personalization_services/NowPlaying__ambient_music_index_manifest_17_09_02=3161:https://storage.googleapis.com/music-iq-db/updatable_db_v3/20260118-030028/manifest.json</item>
+        <!-- Gates the on-demand "search for this song" button against the
+             installed Google App version. Withheld here; without it the button
+             stays hidden even when a new enough AGA is present. -->
+        <item>device_personalization_services/NowPlaying__on_demand_min_supported_aga_version=12.35.17</item>
+        <!-- Page size for the recognition-history list. Withheld here; defaults
+             to something much smaller, which truncates the history view. -->
+        <item>device_personalization_services/NowPlaying__recognition_history_page_size=1000</item>
+        <!-- Take audio from the mic rather than the DSP island. Defaults to true
+             in the APK (myz.<clinit>: const/4 v0,0x1 -> Boolean.valueOf -> the
+             NowPlaying__ambient_music_use_dsp_audio_source qvp), and true is
+             unsatisfiable on onyx - see the DSP note above. Necessary but not
+             sufficient: the ambient pipeline is separately gated on a real
+             SoundTrigger event that onyx never delivers. -->
+        <item>device_personalization_services/NowPlaying__ambient_music_use_dsp_audio_source=false</item>
+    </string-array>
+</resources>
