@@ -16,51 +16,18 @@ in `device/xiaomi/onyx` needs to reference it.
 |---|---|
 | `BoardConfigExtra.mk` | `WITH_GMS`/`BUILD_WITH_GAPPS`, pulls in the four PixelOS `board.mk` files |
 | `BoardConfigKernel.mk` | points `TARGET_OVERRIDE_KERNEL_BIN` at the Kono-Ha kernel Image |
-| `product.mk` | inherits PixelOS GMS, Launcher, ThemePicker, clocks and sounds; keeps crDroid Dialer; drops the Google comms suite; installs the `music_detector` blobs and the DeviceConfig RRO |
+| `product.mk` | inherits PixelOS GMS, Launcher, ThemePicker, clocks and sounds; keeps crDroid Dialer; drops the Google comms suite |
 | `permissions/**` | privapp-permission allowlists for Deskclock and the gesture-hint launcher shim |
-| `firmware/music_detector.*` | Now Playing models copied to `/product/etc/firmware`. Only ungrey ASI's toggle; see below |
-| `rro/SimpleDeviceConfigOverlayOnyx/` | static RRO over `org.protonaosp.deviceconfig` supplying the `NowPlaying__*` DeviceConfig flags Phenotype withholds from non-Pixels |
 
-## Now Playing: the flag that matters
+## Now Playing was removed
 
-`rro/SimpleDeviceConfigOverlayOnyx/res/values/config.xml` carries four flags in
-namespace `device_personalization_services`. Three fix the song-database download
-and history UI. The fourth is the one that decides whether ambient recognition
-can run at all:
-
-```
-NowPlaying__ambient_music_use_dsp_audio_source=false
-```
-
-It defaults to **true** in the ASI APK, which strands every non-Pixel: on this
-SoC `module_type="CUSTOM1"` resolves to a `CustomVAInterface` stub with no ACDB
-graph, so PAL reports `LOAD_MODEL`/`START_RECOGNITION` success while the ADSP
-session underneath is inert (`graph_set_config failed -131`). Recognition itself
-was never on the DSP — ASI ships `libsense.so` / `libsense_nnfp_v3.so` in
-userspace and the model is TFLite — so setting this false makes ASI open a plain
-16 kHz mono mic `AudioRecord` instead, needing no ACDB graph.
-
-**Necessary but not sufficient.** There is a second, separate DSP dependency: the
-*trigger*. `Lyyx`, the object the ambient pipeline consumes, is only ever built
-from a `SoundTrigger$RecognitionEvent`, which ASI never constructs itself and
-which `onyx` never delivers. This flag decides where audio comes from *after* an
-event arrives; it starts nothing. Keep it anyway — it is a prerequisite for any
-trigger fix, since a synthesized event then needs no usable DSP capture session.
-
-On-demand recognition is a different path and should already work: `Lyxx;->d()`
-uses its own mic `AudioRecord` plus `MusicRecognitionManager`, no SoundTrigger.
-
-Costs the mic privacy indicator and standby drain. Confirm the value survives
-boot — `SimpleDeviceConfig` sets it with `makeDefault=true`, which a Phenotype
-push of the same key would still overwrite:
-
-```sh
-adb shell device_config get device_personalization_services \
-    NowPlaying__ambient_music_use_dsp_audio_source
-```
-
-The full decompiled evidence is in the comment block at the top of
-`rro/SimpleDeviceConfigOverlayOnyx/res/values/config.xml` and in `product.mk`.
+On 2026-08-28 the Now Playing work was dropped: the `music_detector` models, the
+`SimpleDeviceConfigOverlayOnyx` RRO, and the SystemUI port in
+`crdroid_onyx_patches`. It never produced a confirmed detection on `onyx` — the
+ambient pipeline is gated on a `SoundTrigger$RecognitionEvent` this ADSP never
+delivers — and Evolution X ships the feature natively on its `bka` branch, so a
+port buys nothing. The removed files and the full decompiled evidence are
+preserved on the `nowplaying-archive` branch of this repo.
 
 `product.mk` depends on five projects from `gitlab.com/pixelos-aosp` being in the
 manifest: `vendor/pixel/{gms,launcher,themepicker,clocks,sounds}`.
