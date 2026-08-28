@@ -1,7 +1,7 @@
 # The Kono-Ha kernel Image (30MB) is not committed. crdroid_onyx_patches/apply.sh
 # downloads it from the konoha-kernel-gki release and drops it at
 # vendor/extra/kernel/onyx/Image, which is where BoardConfigKernel.mk's
-# PRODUCT_COPY_FILES substitution expects it. BoardConfigKernel.mk hard-$(error)s
+# TARGET_OVERRIDE_KERNEL_BIN points. BoardConfigKernel.mk hard-$(error)s
 # if it is missing, so a forgotten apply.sh fails the build instead of silently
-# shipping crDroid's kernel.
+# shipping the tree's own kernel.
 kernel/

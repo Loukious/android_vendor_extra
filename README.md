@@ -1,11 +1,12 @@
-# vendor/extra — personal crDroid `onyx` additions
+# vendor/extra — personal Evolution X `onyx` additions
 
 Auto-included by the build system without appearing in any product makefile:
 
 - `build/make/core/board_config.mk` globs `vendor/*/*/BoardConfig*.mk`, which
   picks up `BoardConfigExtra.mk` and `BoardConfigKernel.mk`.
 - `vendor/lineage/config/common.mk` inherits `vendor/extra/product.mk` if it
-  exists.
+  exists. Under Evolution X that path is `vendor_evolution`, which the manifest
+  mounts at `vendor/lineage` — so this keeps working unchanged.
 
 That is why this directory has to be at exactly `vendor/extra` and why nothing
 in `device/xiaomi/onyx` needs to reference it.
@@ -14,10 +15,10 @@ in `device/xiaomi/onyx` needs to reference it.
 
 | File | Purpose |
 |---|---|
-| `BoardConfigExtra.mk` | `WITH_GMS`/`BUILD_WITH_GAPPS`, pulls in the four PixelOS `board.mk` files |
+| `BoardConfigExtra.mk` | `WITH_GMS := true` |
 | `BoardConfigKernel.mk` | points `TARGET_OVERRIDE_KERNEL_BIN` at the Kono-Ha kernel Image |
-| `product.mk` | inherits PixelOS GMS, Launcher, ThemePicker, clocks and sounds; keeps crDroid Dialer; drops the Google comms suite |
-| `permissions/**` | privapp-permission allowlists for Deskclock and the gesture-hint launcher shim |
+| `product.mk` | `WITH_GMS`, relaxes `check_vintf` for the Kono-Ha kernel, ships one privapp allowlist |
+| `permissions/**` | privapp-permission allowlist for AOSP DeskClock |
 
 ## Now Playing was removed
 
@@ -29,8 +30,31 @@ delivers — and Evolution X ships the feature natively on its `bka` branch, so 
 port buys nothing. The removed files and the full decompiled evidence are
 preserved on the `nowplaying-archive` branch of this repo.
 
-`product.mk` depends on five projects from `gitlab.com/pixelos-aosp` being in the
-manifest: `vendor/pixel/{gms,launcher,themepicker,clocks,sounds}`.
+## GApps come from Evolution X now
+
+The crDroid build carried five PixelOS projects —
+`vendor/pixel/{gms,launcher,themepicker,clocks,sounds}` — and `product.mk`
+inherited each one by hand. All five are gone. Evolution X's own
+`vendor/lineage/config/common_full_phone.mk` inherits `vendor/gms/gms_full.mk`
+whenever `WITH_GMS` is true, and true is its default, so a single variable
+replaces the lot:
+
+| What PixelOS provided | Evolution X equivalent |
+|---|---|
+| `vendor/pixel/gms` | `vendor/gms` (`vendor_gms`) |
+| `vendor/pixel/launcher` | `vendor_gms` ships `NexusLauncherRelease` |
+| `vendor/pixel/sounds` | `vendor_gms` ships `SoundPickerPrebuilt` |
+| `vendor/pixel/clocks`, `vendor/pixel/themepicker` | `vendor/pixel-style`'s RRO set plus `vendor_gms`' `PixelWallpapers2025` |
+
+`vendor/pixel-style` also ships `PixelLauncherNoGestureHintOverlay` — the same
+overlay the old `vendor_pixel_launcher` patch added by hand — and Evolution X's
+`GestureNavigationSettingsFragment` already toggles it from the
+`navigation_bar_hint` preference. That patch and its privileged helper app
+(`com.loukious.pixellauncher.gesturehint`) are therefore gone, along with the
+allowlist entry that went with them.
+
+`vendor_gms` uses Git LFS against Evolution X's own server
+(`git.evolution-x.org`), so `repo init` needs `--git-lfs`.
 
 ## The kernel Image is not committed
 
@@ -41,7 +65,7 @@ charging bypass *off* and extracts `Image.gz` out of the AnyKernel3 zip.
 
 ## How the kernel actually gets swapped
 
-Since crDroid's device tree commit `575e7da99` ("onyx: Switch source built dtbo,
+Since the device tree's commit `575e7da99` ("onyx: Switch source built dtbo,
 kernel and modules") the ROM builds the kernel from `kernel/xiaomi/sm8735`
 rather than shipping a prebuilt. That source build still has to happen — it is
 what produces every vendor module (`mi_fp`, `si_haptic`, the QCOM external
@@ -50,7 +74,7 @@ none of those Xiaomi drivers.
 
 So the kernel is built normally and only the *installed* `Image` is swapped,
 via a three-line `TARGET_OVERRIDE_KERNEL_BIN` hook added to
-`vendor/lineage/build/tasks/kernel.mk` by
+`vendor/lineage/build/tasks/kernel.mk` (`vendor_evolution` under Evolution X) by
 `crdroid_onyx_patches/patches/vendor_lineage/0002-kernel-bin-override.patch`.
 
 `TARGET_FORCE_PREBUILT_KERNEL` is deliberately **not** used: it sets

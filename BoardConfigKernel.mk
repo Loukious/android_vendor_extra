@@ -2,55 +2,57 @@
 # Personal onyx kernel override.
 # Kono-Ha 1.1 with KernelSU Next.
 #
-# HISTORY / WHY THIS LOOKS THE WAY IT DOES
+# HOW THE SUBSTITUTION WORKS
 #
-# An earlier version of this file relied solely on TARGET_OVERRIDE_KERNEL_BIN
-# (added by patches/vendor_lineage/0002-kernel-bin-override.patch) on the theory
-# that the device tree no longer ships a prebuilt kernel. That theory was wrong,
-# and the resulting build silently shipped crDroid's kernel instead of ours --
-# no error, no warning, just the wrong Image inside boot.img.
+# device/xiaomi/onyx builds the kernel from source -- BoardConfig.mk sets
+# TARGET_KERNEL_SOURCE := kernel/xiaomi/sm8735 and there is no prebuilt under a
+# PREBUILT_PATH any more (that changed in device commit 575e7da99, "onyx: Switch
+# source built dtbo, kernel and modules"). The source build still has to happen:
+# it is what produces the vendor modules (mi_fp, si_haptic, the QCOM external
+# modules) and the dtb/dtbo images. Only the kernel binary is ours.
 #
-# Two independent reasons it failed, both still true today:
+# So the swap goes through TARGET_OVERRIDE_KERNEL_BIN, which
+# patches/vendor_lineage/0002-kernel-bin-override.patch adds to
+# vendor/lineage/build/tasks/kernel.mk (vendor_evolution under Evolution X). It
+# reassigns KERNEL_BIN immediately before
 #
-#   1. device/xiaomi/onyx/BoardConfig.mk sets TARGET_NO_KERNEL_OVERRIDE := true.
-#      In vendor/lineage/build/tasks/kernel.mk that opens an
-#      `ifneq ($(TARGET_NO_KERNEL_OVERRIDE),true)` at line 106 which does not
-#      close until line 810. The TARGET_OVERRIDE_KERNEL_BIN block lives at ~790,
-#      i.e. *inside* the skipped region, so nothing ever reads the variable.
+#     ifeq ($(NEEDS_KERNEL_COPY),true)
+#     $(INSTALLED_KERNEL_TARGET): $(KERNEL_BIN)
 #
-#   2. The kernel does not arrive via $(INSTALLED_KERNEL_TARGET) at all. It is a
-#      plain PRODUCT_COPY_FILES entry in BoardConfig.mk:
-#          PRODUCT_COPY_FILES += $(PREBUILT_PATH)/images/kernel:kernel
-#      which copies crDroid's prebuilt straight to $(PRODUCT_OUT)/kernel, and
-#      that is what boot.img is assembled from.
+# so it changes only the binary copied to $(PRODUCT_OUT)/kernel. Every module
+# and device-tree rule above that point still consumes
+# TARGET_PREBUILT_INT_KERNEL and is untouched.
 #
-# So the substitution has to happen at the PRODUCT_COPY_FILES level. This file is
-# `-include`d from BoardConfig.mk:265, well after the entry is added at :110, so
-# filter-out can see it.
+# Deliberately NOT using TARGET_FORCE_PREBUILT_KERNEL: that sets
+# FULL_KERNEL_BUILD := false, which would skip module and dtbo generation
+# entirely.
 #
-# TARGET_OVERRIDE_KERNEL_BIN is kept as belt-and-braces: if the device tree ever
-# goes back to source-built kernels it will drop both TARGET_NO_KERNEL_OVERRIDE
-# and the PRODUCT_COPY_FILES entry, at which point the filter-out below becomes a
-# no-op and the kernel.mk hook takes over instead.
-#
-# Deliberately NOT using TARGET_FORCE_PREBUILT_KERNEL: it sets
-# FULL_KERNEL_BUILD := false, which would skip module and dtbo generation. Not
-# that it matters while TARGET_NO_KERNEL_OVERRIDE is set (modules and dtbo are
-# themselves prebuilts under $(PREBUILT_PATH)), but it would matter the moment
-# that changes.
+# The override block sits inside kernel.mk's
+# `ifneq ($(TARGET_NO_KERNEL_OVERRIDE),true)` region (line 106 to 838 on
+# vendor_evolution bka). The onyx device tree does not set that variable, so the
+# region is live. If it ever starts setting it, the block goes dark and the
+# guarded PRODUCT_COPY_FILES fallback at the bottom of this file takes over.
 #
 
-# Fail loudly rather than silently shipping crDroid's kernel -- that is the exact
-# bug this file exists to prevent.
+# Fail loudly rather than silently shipping the tree's own kernel -- that is the
+# exact bug this file exists to prevent, and it has happened before.
 ifeq ($(wildcard vendor/extra/kernel/onyx/Image),)
 $(error vendor/extra/kernel/onyx/Image is missing. Run crdroid_onyx_patches/apply.sh to stage the Kono-Ha kernel before building.)
 endif
 
-# 1. Drop crDroid's prebuilt kernel copy, 2. substitute ours.
+TARGET_OVERRIDE_KERNEL_BIN := vendor/extra/kernel/onyx/Image
+
+# Fallback for a device tree that goes back to shipping a prebuilt kernel, which
+# it would install with a plain
+#     PRODUCT_COPY_FILES += $(PREBUILT_PATH)/images/kernel:kernel
+# bypassing $(INSTALLED_KERNEL_TARGET) and therefore KERNEL_BIN entirely.
+#
+# Guarded on PREBUILT_PATH because with a source-built kernel both this entry and
+# $(INSTALLED_KERNEL_TARGET) would write $(PRODUCT_OUT)/kernel, and two rules for
+# one output is a hard ninja error.
+ifneq ($(PREBUILT_PATH),)
 PRODUCT_COPY_FILES := \
     $(filter-out $(PREBUILT_PATH)/images/kernel:kernel,$(PRODUCT_COPY_FILES))
 PRODUCT_COPY_FILES += \
     vendor/extra/kernel/onyx/Image:kernel
-
-# Inert while TARGET_NO_KERNEL_OVERRIDE is true; see the comment above.
-TARGET_OVERRIDE_KERNEL_BIN := vendor/extra/kernel/onyx/Image
+endif
